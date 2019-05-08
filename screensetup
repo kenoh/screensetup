@@ -8,9 +8,6 @@ import daemon
 import yaml
 import jsonschema
 
-
-log.basicConfig(level=log.DEBUG)
-
 #################
 # CONFIGURATION #
 #################
@@ -70,14 +67,19 @@ SCHEMA = {
     "required": ["setups"]
 }
 
+log.basicConfig(level=log.DEBUG)
+
+
 def validate_config(config):
     return jsonschema.validate(config, SCHEMA) is None
         
+
 def read_config():
     filename = os.path.expanduser(CONFIG_FILE)
     with open(filename, 'r') as f:
         config = yaml.safe_load(f.read())
         return config if validate_config(config) else False
+
 
 def xrandr_format(display, opts, dpi):
     # sum(x, []) flattens the [[]] to []
@@ -195,9 +197,12 @@ def enable_profile(profile, config, dry_run):
     set_dpi(p['dpi'], dry_run)
 
 
+def list_profiles():
+    return read_config()['setups'].keys()
+
+
 def autocomplete_profiles(ctx, args, incomplete):
-    keys = read_config()['setups'].keys()
-    return [ k for k in keys if incomplete in k ]
+    return [ k for k in list_profiles() if incomplete in k ]
 
 
 @click.group()
@@ -207,7 +212,7 @@ def cli():
 
 @cli.command('list')
 def cli_list_profiles():
-    print('\n'.join(profiles.keys()))
+    print('\n'.join(list_profiles()))
 
 
 @cli.command('set')
