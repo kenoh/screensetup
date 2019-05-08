@@ -1,0 +1,235 @@
+#!/usr/bin/env python3
+import subprocess as sp
+import click
+import logging as log
+import copy
+import os
+import daemon
+import yaml
+import jsonschema
+
+
+log.basicConfig(level=log.DEBUG)
+
+#################
+# CONFIGURATION #
+#################
+
+CONFIG_FILE = '~/.screensetup.yaml'
+
+#################
+
+SCHEMA = {
+    "definitions": {
+        "displays_setup": {
+            "title": "xrandr outputs",
+            "type": "object",
+            "additionalProperties": {
+                "title": "xrandr arguments (names without leading --)",
+                "type": ["object", "null"],
+                "additionalProperties": {
+                    "type": ["string", "null"]
+                }
+            }
+        },
+        "setup": {
+            "title": "one setup to be used",
+            "type": "object",
+            "properties": {
+                "dpi": { "type": "integer" },
+                "displays": {
+                    "oneOf": [
+                       { "type": "array",
+                         "items": { "$ref": "#/definitions/displays_setup" }
+                       },
+                       { "$ref": "#/definitions/displays_setup" }
+                   ]
+                },
+                "workspaces": {
+                    "title": "mapping of workspace to output",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                }
+            }
+        }            
+    },
+    "type": "object",
+    "properties": {
+        "default_setup": {
+            "$ref": "#/definitions/setup"
+        },
+        "setups": {
+            "type": "object",
+            "additionalProperties": {
+                "$ref": "#/definitions/setup"
+            }
+        }
+    },
+    "required": ["setups"]
+}
+
+def validate_config(config):
+    return jsonschema.validate(config, SCHEMA) is None
+        
+def read_config():
+    filename = os.path.expanduser(CONFIG_FILE)
+    with open(filename, 'r') as f:
+        config = yaml.safe_load(f.read())
+        return config if validate_config(config) else False
+
+def xrandr_format(display, opts, dpi):
+    # sum(x, []) flattens the [[]] to []
+    rendered = sum([[f'--{k}', v] for k, v in opts.items()], [])
+    # drop None, as it appears when no value for an opt is passed
+    rendered = [x for x in rendered if x is not None]
+    # maybe add DPI
+    if dpi:
+        rendered += ['--dpi', str(dpi)]
+    return ['--output', display] + rendered
+
+
+def set_dpi(dpi, dry_run):
+    text = f"""Xft/DPI {dpi * 1024}
+Gdk/WindowScalingFactor {round(dpi / 96.0)}
+Gdk/UnscaledDPI {int(dpi * 1024 / round(dpi / 96.0))}
+
+Xft/Antialias 1
+Xft/HintStyle "hintfull"
+Xft/Hinting 1
+Xft/RGBA "rgb"
+"""
+    filename = '~/.xsettingsd'
+    if not dry_run:
+        with open(os.path.expanduser(filename), 'w') as f:
+            f.write(text)
+    else:
+        log.info(f'Would write following into {filename}:\n{text}') 
+
+    cmd = ['pkill', '-HUP', 'xsettingsd']
+    if not dry_run:
+        try:
+            sp.run(cmd, check=True)
+        except sp.CalledProcessError:
+            with daemon.DaemonContext():
+                sp.run(['xsettingsd'])
+                exit()
+    else:
+        log.info(f'Would run: {cmd}')
+
+    cmd = ['xrdb', '-merge']
+    text = f'Xft.dpi: {dpi}\n'
+    if not dry_run:
+        sp.run(cmd, text=True, input=text)
+    else:
+        log.info(f'Would run: {cmd}')
+        log.info(f'... with input: {text}')
+
+    cmd = ['i3-msg', 'restart']
+    if not dry_run:
+        sp.run(cmd)
+    else:
+        log.info(f'Would run: {cmd}')
+
+    cmd = [os.path.expanduser('~/bin/xinit.sh')]
+    if not dry_run:
+        sp.run(cmd)
+    else:
+        log.info(f'Would run: {cmd}')
+
+
+def run_xrandr(ds, dpi, config, dry_run):
+    def flatten(list_of_lists):
+        return [inner for outer in list_of_lists for inner in outer]
+
+    # bring in defaults
+    for k, v in ds.items():
+        ds[k] = {'mode': '1920x1080', 'panning': '0x0', **(v or {})}
+
+    # xrandr
+    all_displays = os.popen("xrandr | grep 'connected' | awk {'print $1'}").read().splitlines()
+    missing_displays = set(all_displays) - set(ds.keys())
+    missing = flatten([xrandr_format(d, {'off': None}, None) for d in missing_displays])
+    setting = flatten([xrandr_format(d, opts, dpi) for d, opts in ds.items()])
+    cmd = ['xrandr'] + missing + setting
+    if not dry_run:
+        try:
+            log.info(f'Running: {" ".join(cmd)}')
+            sp.run(cmd, check=True)
+        except sp.CalledProcessError:
+            log.error('Running xrandr failed.')
+    else:
+        log.info(f'Would run: {cmd}')
+
+
+def enable_profile(profile, config, dry_run):
+    try:
+        p = copy.deepcopy(config['setups'][profile])
+    except KeyError:
+        log.error(f'Unknown profile: {profile}. Use `list` to list available profiles.')
+        exit(1)
+
+    # default dpi
+    if 'dpi' not in p:
+        p['dpi'] = 96
+
+    # xrandr
+    dss = [p['displays']] if type(p['displays']) == dict else p['displays']
+    for q in dss:
+        run_xrandr(q, p['dpi'], config, dry_run)
+
+    # workspaces
+    kw = 'workspaces'
+    if kw not in p:
+        p[kw] = {}
+    for w, d in p[kw].items():
+        cmd = ['i3-msg', f'workspace {w} ; move workspace to output {d}']
+        if not dry_run:
+            sp.run(cmd)
+        else:
+            log.info(f'Would run: {cmd}')
+
+    # hidpi
+    log.info(f'Setting DPI to {p["dpi"]}.')
+    set_dpi(p['dpi'], dry_run)
+
+
+def autocomplete_profiles(ctx, args, incomplete):
+    keys = read_config()['setups'].keys()
+    return [ k for k in keys if incomplete in k ]
+
+
+@click.group()
+def cli():
+    pass
+
+
+@cli.command('list')
+def cli_list_profiles():
+    print('\n'.join(profiles.keys()))
+
+
+@cli.command('set')
+@click.argument('profile', autocompletion=autocomplete_profiles)
+@click.option('-n', '--dry-run', is_flag=True)
+def cli_set_profile(profile, dry_run):
+    config = read_config()
+    enable_profile(profile, config, dry_run)
+
+
+@cli.command('set-dpi')
+@click.argument('dpi')
+def cli_dpi(dpi):
+    set_dpi(int(dpi))
+
+
+@cli.command('validate-config', help='If valid, prints parsed config')
+def cli_validate_config():
+    config = read_config()
+    validate_config(config)
+    print(yaml.dump(config))
+
+
+if __name__ == '__main__':
+    cli()
