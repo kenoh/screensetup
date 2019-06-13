@@ -144,12 +144,21 @@ Xft/RGBA "rgb"
 
 
 def run_xrandr(ds, dpi, config, dry_run):
+    log.debug(f'run_xrandr:ds :: {ds}')
+    log.debug(f'run_xrandr:dpi :: {dpi}')
+    log.debug(f'run_xrandr:config :: {config}')
+    log.debug(f'run_xrandr:dry_run :: {dry_run}')
+
     def flatten(list_of_lists):
         return [inner for outer in list_of_lists for inner in outer]
 
     # bring in defaults
     for k, v in ds.items():
-        ds[k] = {'mode': '1920x1080', 'panning': '0x0', **(v or {})}
+        defs = {'mode': '1920x1080', 'panning': '0x0',
+                **(config['default_setup']['displays'].get(k, {})),
+                **(v or {})}
+        log.debug(f'run_xrandr:ds[{k}] <= {defs}')
+        ds[k] = defs
 
     # xrandr
     all_displays = os.popen("xrandr | grep 'connected' | awk {'print $1'}").read().splitlines()
