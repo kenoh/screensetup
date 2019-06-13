@@ -42,7 +42,9 @@ SCHEMA = {
                        { "$ref": "#/definitions/displays_setup" }
                    ]
                 },
-                "workspaces": {
+                "pre": { "type": "string" },
+                "post": { "type": "string" },
+                "i3workspaces": {
                     "title": "mapping of workspace to output",
                     "type": "object",
                     "additionalProperties": {
@@ -50,7 +52,7 @@ SCHEMA = {
                     }
                 }
             }
-        }            
+        }
     },
     "type": "object",
     "properties": {
@@ -72,7 +74,7 @@ log.basicConfig(level=log.DEBUG)
 
 def validate_config(config):
     return jsonschema.validate(config, SCHEMA) is None
-        
+
 
 def read_config():
     filename = os.path.expanduser(CONFIG_FILE)
@@ -165,6 +167,16 @@ def run_xrandr(ds, dpi, config, dry_run):
         log.info(f'Would run: {cmd}')
 
 
+def maybe_run_hook(profile, hook_name, dry_run):
+    if hook_name in profile:
+        if dry_run:
+            log.info(f'Would run hook `{hook_name}` with `sh -c`: {profile[hook_name]}')
+        else:
+            sp.run(['sh', '-c', profile[hook_name]])
+    else:
+        log.debug(f'Ignoring missing hook `{hook_name}`.')
+
+
 def enable_profile(profile, config, dry_run):
     try:
         p = copy.deepcopy(config['setups'][profile])
@@ -172,17 +184,22 @@ def enable_profile(profile, config, dry_run):
         log.error(f'Unknown profile: {profile}. Use `list` to list available profiles.')
         exit(1)
 
+    log.debug('Processing pre-hook')
+    maybe_run_hook(p, 'pre', dry_run)
+
     # default dpi
     if 'dpi' not in p:
         p['dpi'] = 96
 
     # xrandr
+    log.debug('Processing xrandr')
     dss = [p['displays']] if type(p['displays']) == dict else p['displays']
     for q in dss:
         run_xrandr(q, p['dpi'], config, dry_run)
 
     # workspaces
-    kw = 'workspaces'
+    log.debug('Processing i3workspaces')
+    kw = 'i3workspaces'
     if kw not in p:
         p[kw] = {}
     for w, d in p[kw].items():
@@ -193,8 +210,12 @@ def enable_profile(profile, config, dry_run):
             log.info(f'Would run: {cmd}')
 
     # hidpi
+    log.debug('Processing hidpi')
     log.info(f'Setting DPI to {p["dpi"]}.')
     set_dpi(p['dpi'], dry_run)
+
+    log.debug('Processing post-hook')
+    maybe_run_hook(p, 'post', dry_run)
 
 
 def list_profiles():
